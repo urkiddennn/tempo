@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/faiface/beep"
 	"github.com/faiface/beep/mp3"
 	"github.com/faiface/beep/speaker"
@@ -21,12 +23,91 @@ const (
 	musicDir   = "./music"
 )
 
+type model struct {
+	currentSong string
+	rms         float64
+	freq        float64
+}
+
+type updateMsg struct {
+	rms         float64
+	freq        float64
+	currentSong string
+}
+
+func (m model) Init() tea.Cmd {
+	return nil
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" || msg.String() == "q" {
+			return m, tea.Quit
+		}
+	case updateMsg:
+		m.currentSong = msg.currentSong
+		m.rms = msg.rms
+		m.freq = msg.freq
+	}
+	return m, nil
+}
+
+func (m model) View() string {
+	// Styles
+	headerStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#FF6347")).
+		Padding(0, 1)
+
+	labelStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFD700")).
+		Padding(0, 1)
+
+	valueStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#7D56F4"))
+
+	barStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#00FF00")).Width(20).
+		Padding(0, 1)
+
+	// Build vertical amplitude bar
+	maxBarHeight := 20 // Maximum height of the bar in rows
+	barHeight := int(m.rms * float64(maxBarHeight))
+	if barHeight > maxBarHeight {
+		barHeight = maxBarHeight
+	}
+	bar := strings.Repeat("█\n", barHeight) + strings.Repeat(" \n", maxBarHeight-barHeight)
+	styledBar := barStyle.Render("Amplitude\n" + bar)
+
+	// Text content
+	textContent := lipgloss.JoinVertical(lipgloss.Left,
+		headerStyle.Render("Real-Time Audio Analysis"),
+		labelStyle.Render("Current Song: ")+valueStyle.Render(m.currentSong),
+		labelStyle.Render("RMS Amplitude: ")+valueStyle.Render(fmt.Sprintf("%.4f", m.rms)),
+		labelStyle.Render("Dominant Frequency: ")+valueStyle.Render(fmt.Sprintf("%.2f Hz", m.freq)),
+		"\nPress q or Ctrl+C to quit",
+	)
+
+	// Combine text and bar horizontally
+	return lipgloss.JoinHorizontal(lipgloss.Top, textContent, styledBar)
+}
+
 func main() {
 	// Initialize speaker
 	err := speaker.Init(sampleRate, sampleRate/10)
 	if err != nil {
 		log.Fatalf("Error initializing speaker: %v", err)
 	}
+
+	// Initialize Bubble Tea program
+	p := tea.NewProgram(model{currentSong: "None"}, tea.WithOutput(os.Stdout))
+	go func() {
+		if err := p.Start(); err != nil {
+			log.Fatalf("Error starting TUI: %v", err)
+		}
+		os.Exit(0)
+	}()
 
 	// Scan music directory
 	files, err := scanMusicDir(musicDir)
@@ -36,13 +117,17 @@ func main() {
 
 	// Process each file
 	for _, file := range files {
-		fmt.Printf("\nPlaying: %s\n", filepath.Base(file))
-		err := playAndAnalyze(file)
+		// Update TUI with current song
+		p.Send(updateMsg{currentSong: filepath.Base(file)})
+		err := playAndAnalyze(file, p)
 		if err != nil {
 			log.Printf("Error playing %s: %v", file, err)
 			continue
 		}
 	}
+
+	// Quit TUI when done
+	p.Send(tea.Quit())
 }
 
 func scanMusicDir(dir string) ([]string, error) {
@@ -59,7 +144,7 @@ func scanMusicDir(dir string) ([]string, error) {
 	return files, err
 }
 
-func playAndAnalyze(file string) error {
+func playAndAnalyze(file string, p *tea.Program) error {
 	// Open music file
 	f, err := os.Open(file)
 	if err != nil {
@@ -95,8 +180,12 @@ func playAndAnalyze(file string) error {
 		case <-ticker.C:
 			// Get latest analysis
 			rms, freq := analyzer.getAnalysis()
-			// Print results
-			printAnalysis(rms, freq)
+			// Update TUI
+			p.Send(updateMsg{
+				rms:         rms,
+				freq:        freq,
+				currentSong: filepath.Base(file),
+			})
 		case <-done:
 			return nil
 		}
@@ -122,7 +211,6 @@ func (a *analyzerStreamer) Stream(samples [][2]float64) (n int, ok bool) {
 	// Calculate RMS amplitude
 	var sum float64
 	for _, sample := range samples {
-		// Use left channel (sample[0]) for mono analysis
 		sum += sample[0] * sample[0]
 	}
 	a.rms = math.Sqrt(sum / float64(len(samples)))
@@ -161,26 +249,4 @@ func (a *analyzerStreamer) Err() error {
 
 func (a *analyzerStreamer) getAnalysis() (rms, freq float64) {
 	return a.rms, a.freq
-}
-
-func printAnalysis(rms, freq float64) {
-	// Clear terminal (works on Unix-like systems)
-	fmt.Print("\033[H\033[2J")
-	fmt.Printf("RMS Amplitude: %.4f\n", rms)
-	fmt.Printf("Dominant Frequency: %.2f Hz\n", freq)
-
-	// Simple ASCII bar for amplitude
-	barLength := int(rms * 50) // Scale for visualization
-	if barLength > 50 {
-		barLength = 50
-	}
-	fmt.Print("Amplitude: [")
-	for i := 0; i < 50; i++ {
-		if i < barLength {
-			fmt.Print("=")
-		} else {
-			fmt.Print(" ")
-		}
-	}
-	fmt.Println("]")
 }
